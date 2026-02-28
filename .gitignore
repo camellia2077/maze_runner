@@ -1,3 +1,7 @@
 build/
-build_debug/
+build_tidy/
+temp/
+input/
+output/
+__pycache__/
 *.png
