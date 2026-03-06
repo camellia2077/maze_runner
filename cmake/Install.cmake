@@ -8,6 +8,7 @@ endif()
 
 set(MAZE_PUBLIC_HEADERS
     libs/maze_api_c/api/maze_api.h
+    libs/maze_export/export/maze_export.h
     libs/maze_usecase/usecase/maze_pipeline.h
     libs/maze_core/application/services/maze_generation.h
     libs/maze_core/application/services/maze_runtime_context.h
@@ -24,7 +25,7 @@ set(MAZE_PUBLIC_HEADERS
 )
 
 install(
-    TARGETS maze_core maze_infra maze_usecase maze_api_c maze_cli
+    TARGETS maze_core maze_export maze_infra maze_usecase maze_api_c maze_cli
     EXPORT MazeGeneratorTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -39,6 +40,11 @@ foreach(header_path IN LISTS MAZE_PUBLIC_HEADERS)
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/${header_subdir}"
     )
 endforeach()
+
+install(
+    FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/common/kernel_version.hpp"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/common"
+)
 
 install(
     EXPORT MazeGeneratorTargets

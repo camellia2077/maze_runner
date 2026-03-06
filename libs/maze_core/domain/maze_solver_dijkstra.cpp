@@ -32,19 +32,25 @@ void EnqueueDijkstraNeighbors(
 }  // namespace
 
 auto SolveDijkstra(const MazeGrid& maze_grid, GridPosition start_node,
-                   GridPosition end_node) -> SearchResult {
+                   GridPosition end_node, ISearchEventSink* event_sink,
+                   const SolveOptions& options) -> SearchResult {
+  auto execution_state = CreateExecutionState(event_sink, options);
+  EmitRunStarted(execution_state);
+
   SearchResult result;
   const auto kGridSize = GetGridSize(maze_grid);
   if (!kGridSize.has_value()) {
+    EmitRunFailed(execution_state, "Invalid maze grid.");
     return result;
   }
   if (!IsValidPosition(start_node, *kGridSize) ||
       !IsValidPosition(end_node, *kGridSize)) {
+    EmitRunFailed(execution_state, "Start or end node out of bounds.");
     return result;
   }
 
   if (start_node == end_node) {
-    return CreateTrivialResult(*kGridSize, start_node);
+    return CreateTrivialResult(*kGridSize, start_node, execution_state);
   }
 
   const PathEndpoints kEndpoints{.start = start_node, .end = end_node};
@@ -61,10 +67,15 @@ auto SolveDijkstra(const MazeGrid& maze_grid, GridPosition start_node,
   frontier.push({0, 0, start_node});
   visual_states[start_node.first][start_node.second] =
       SolverCellState::FRONTIER;
-  PushFrame(result, visual_states, {});
+  EmitProgress(execution_state, visual_states, {}, true);
 
   bool found = false;
   while (!frontier.empty() && !found) {
+    if (ShouldCancel(execution_state)) {
+      result.cancelled_ = true;
+      break;
+    }
+
     const AStarNode kCurrentNode = frontier.top();
     frontier.pop();
 
@@ -73,14 +84,14 @@ auto SolveDijkstra(const MazeGrid& maze_grid, GridPosition start_node,
       continue;
     }
 
-    const bool kShouldSaveFrame =
-        ShouldSaveFrameForCurrent(parents, kCurrent, kEndpoints);
+    const bool kShouldEmitProgress =
+        ShouldEmitProgressForCurrent(parents, kCurrent, kEndpoints);
 
     visited[kCurrent.first][kCurrent.second] = true;
     visual_states[kCurrent.first][kCurrent.second] =
         SolverCellState::CURRENT_PROC;
-    if (kShouldSaveFrame) {
-      PushFrame(result, visual_states, {});
+    if (kShouldEmitProgress) {
+      EmitProgress(execution_state, visual_states, {}, false);
     }
 
     if (kCurrent == end_node) {
@@ -96,13 +107,19 @@ auto SolveDijkstra(const MazeGrid& maze_grid, GridPosition start_node,
           SolverCellState::VISITED_PROC;
     }
 
-    if (kShouldSaveFrame) {
-      PushFrame(result, visual_states, {});
+    if (kShouldEmitProgress) {
+      EmitProgress(execution_state, visual_states, {}, false);
     }
   }
 
+  if (result.cancelled_) {
+    result.explored_ = std::move(visited);
+    EmitRunCancelled(execution_state, "Cancelled by sink.");
+    return result;
+  }
+
   FinalizeSearchResult(found, kEndpoints, parents, visual_states,
-                       std::move(visited), result);
+                       std::move(visited), execution_state, result);
   return result;
 }
 

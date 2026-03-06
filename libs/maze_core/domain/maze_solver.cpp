@@ -82,7 +82,8 @@ auto MazeSolverFactory::Names() const -> std::vector<std::string> {
 }
 
 auto Solve(const MazeGrid& maze_grid, GridPosition start_node,
-           GridPosition end_node, SolverAlgorithmType algorithm_type)
+           GridPosition end_node, SolverAlgorithmType algorithm_type,
+           ISearchEventSink* event_sink, const SolveOptions& options)
     -> SearchResult {
   auto solver = MazeSolverFactory::Instance().GetSolver(algorithm_type);
   if (!solver) {
@@ -91,7 +92,7 @@ auto Solve(const MazeGrid& maze_grid, GridPosition start_node,
   if (!solver) {
     return {};
   }
-  return solver(maze_grid, start_node, end_node);
+  return solver(maze_grid, start_node, end_node, event_sink, options);
 }
 
 auto AlgorithmName(SolverAlgorithmType algorithm_type) -> std::string {

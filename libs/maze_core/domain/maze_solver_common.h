@@ -1,7 +1,9 @@
 #ifndef MAZE_DOMAIN_MAZE_SOLVER_COMMON_H
 #define MAZE_DOMAIN_MAZE_SOLVER_COMMON_H
 
+#include <cstdint>
 #include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -12,13 +14,25 @@ namespace MazeSolverDomain::detail {
 
 using MazeGrid = MazeDomain::MazeGrid;
 using GridPosition = MazeSolverDomain::GridPosition;
-using SearchFrame = MazeSolverDomain::SearchFrame;
 using SearchResult = MazeSolverDomain::SearchResult;
+using SearchEvent = MazeSolverDomain::SearchEvent;
+using SearchEventType = MazeSolverDomain::SearchEventType;
+using SolveOptions = MazeSolverDomain::SolveOptions;
+using ISearchEventSink = MazeSolverDomain::ISearchEventSink;
 using SolverCellState = MazeSolverDomain::SolverCellState;
 using BoolGrid = std::vector<std::vector<bool>>;
 using IntGrid = std::vector<std::vector<int>>;
 using StateGrid = std::vector<std::vector<SolverCellState>>;
 using ParentGrid = std::vector<std::vector<MazeDomain::CellId>>;
+
+struct SolveExecutionState {
+  ISearchEventSink* sink = nullptr;
+  SolveOptions options;
+  uint64_t next_seq = 1;
+  int step_counter = 0;
+  bool has_emitted_state = false;
+  StateGrid last_emitted_states;
+};
 
 struct GridSize {
   int height;
@@ -73,16 +87,31 @@ auto CreateParentGrid(GridSize grid_size, MazeDomain::CellId initial)
 auto ToCellId(GridSize grid_size, GridPosition pos) -> MazeDomain::CellId;
 auto ToGridPosition(GridSize grid_size, MazeDomain::CellId cell_id)
     -> GridPosition;
-void PushFrame(SearchResult& result, const StateGrid& visual_states,
-               const std::vector<GridPosition>& current_path);
-auto ShouldSaveFrameForCurrent(const ParentGrid& parents, GridPosition current,
-                               const PathEndpoints& endpoints) -> bool;
-auto ShouldSaveBacktrackFrame(const ParentGrid& parents, GridPosition current,
-                              const PathEndpoints& endpoints) -> bool;
-auto CreateTrivialResult(GridSize grid_size, GridPosition node) -> SearchResult;
+auto CreateExecutionState(ISearchEventSink* sink, const SolveOptions& options)
+    -> SolveExecutionState;
+auto ShouldCancel(const SolveExecutionState& execution_state) -> bool;
+void EmitRunStarted(SolveExecutionState& execution_state);
+void EmitRunFailed(SolveExecutionState& execution_state,
+                   std::string_view message);
+void EmitRunCancelled(SolveExecutionState& execution_state,
+                      std::string_view message);
+void EmitRunFinished(SolveExecutionState& execution_state,
+                     const SearchResult& result);
+void EmitProgress(SolveExecutionState& execution_state,
+                  const StateGrid& visual_states,
+                  const std::vector<GridPosition>& current_path,
+                  bool force_emit = false);
+auto ShouldEmitProgressForCurrent(const ParentGrid& parents, GridPosition current,
+                                  const PathEndpoints& endpoints) -> bool;
+auto ShouldEmitBacktrackProgress(const ParentGrid& parents, GridPosition current,
+                                 const PathEndpoints& endpoints) -> bool;
+auto CreateTrivialResult(GridSize grid_size, GridPosition node,
+                         SolveExecutionState& execution_state) -> SearchResult;
 void FinalizeSearchResult(bool found, const PathEndpoints& endpoints,
                           const ParentGrid& parents, StateGrid& visual_states,
-                          BoolGrid&& visited, SearchResult& result);
+                          BoolGrid&& visited,
+                          SolveExecutionState& execution_state,
+                          SearchResult& result);
 auto ManhattanDistance(PositionPair positions) -> int;
 auto ReachableNeighbors(const MazeGrid& maze_grid, GridSize grid_size,
                         GridPosition current, NeighborOrder order)

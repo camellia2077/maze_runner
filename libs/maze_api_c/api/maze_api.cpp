@@ -1,51 +1,55 @@
 #include "api/maze_api.h"
 
+#include <atomic>
 #include <chrono>
-#include <cstring>
 #include <new>
 #include <optional>
 #include <regex>
 #include <sstream>
 #include <string>
-#include <vector>
 
 #include "application/services/maze_generation.h"
 #include "application/services/maze_runtime_context.h"
 #include "application/services/maze_solver.h"
 #include "config/config.h"
-#include "domain/grid_topology.h"
-#include "infrastructure/graphics/maze_renderer.h"
+#include "domain/maze_solver.h"
 
-struct ApiFrameBuffer {
-  int width = 0;
-  int height = 0;
-  int channels = 0;
-  std::vector<unsigned char> pixels;
-};
-
-struct MazeHandle {
+struct MazeSession {
   Config::AppConfig config;
   std::string last_error;
   std::string summary_json;
-  std::vector<ApiFrameBuffer> frame_buffers;
-  MazeFrameCallback frame_callback = nullptr;
-  void* frame_callback_user_data = nullptr;
-  bool has_request = false;
-  bool write_png_output = false;
-  std::optional<int> random_seed;
+  bool configured = false;
   int requested_schema_version = 1;
+  std::optional<int> random_seed;
+  std::atomic<bool> cancel_requested{false};
+  MazeEventCallback event_callback = nullptr;
+  void* event_callback_user_data = nullptr;
+  std::string event_json_cache;
+  MazeSolver::SolveOptions solve_options;
+  uint64_t next_event_seq = 1;
 };
 
 namespace {
 
-constexpr char kApiVersion[] = "0.2.0";
-constexpr char kNotImplemented[] = "Not implemented in Step 3.2.";
-constexpr int kRgbaChannels = 4;
+constexpr char kApiVersion[] = "0.3.0";
 constexpr int kSupportedSchemaVersion = 1;
+constexpr int kWallTop = 0;
+constexpr int kWallRight = 1;
+constexpr int kWallBottom = 2;
+constexpr int kWallLeft = 3;
 
-auto SetError(MazeHandle* handle, int status_code, std::string message) -> int {
-  if (handle != nullptr) {
-    handle->last_error = std::move(message);
+auto NextEventSeq(MazeSession* session) -> uint64_t {
+  if (session == nullptr) {
+    return 0;
+  }
+  const uint64_t seq = session->next_event_seq;
+  session->next_event_seq += 1;
+  return seq;
+}
+
+auto SetError(MazeSession* session, int status_code, std::string message) -> int {
+  if (session != nullptr) {
+    session->last_error = std::move(message);
   }
   return status_code;
 }
@@ -86,16 +90,6 @@ auto ExtractIntValue(const std::string& json_text, const char* key,
     return default_value;
   }
   return std::stoi(match[1].str());
-}
-
-auto ExtractBoolValue(const std::string& json_text, const char* key,
-                      bool default_value) -> bool {
-  const std::regex pattern("\"" + std::string(key) + "\"\\s*:\\s*(true|false)");
-  std::smatch match;
-  if (!std::regex_search(json_text, match, pattern)) {
-    return default_value;
-  }
-  return match[1].str() == "true";
 }
 
 auto ExtractOptionalIntValue(const std::string& json_text, const char* key)
@@ -165,17 +159,20 @@ auto ExtractObjectValue(const std::string& json_text, const char* key)
   return std::nullopt;
 }
 
-auto BuildSummaryJson(const Config::AppConfig& config,
-                      const std::string& generation_algorithm,
-                      const std::string& search_algorithm, int frame_count,
-                      bool found, int path_length, long long elapsed_ms,
-                      int requested_schema_version, bool write_png,
-                      const std::optional<int>& random_seed, int status_code,
+auto BuildSummaryJson(const MazeSession* session, const std::string& generation,
+                      const std::string& search, bool found, int path_length,
+                      long long elapsed_ms, int status_code,
                       const std::string& message) -> std::string {
-  const std::string safe_message = JsonEscape(message);
-  const std::string safe_generation = JsonEscape(generation_algorithm);
-  const std::string safe_search = JsonEscape(search_algorithm);
-  const std::string safe_output_dir = JsonEscape(config.output_dir);
+  Config::AppConfig config;
+  int requested_schema_version = kSupportedSchemaVersion;
+  std::optional<int> random_seed;
+  int emit_stride = 1;
+  if (session != nullptr) {
+    config = session->config;
+    requested_schema_version = session->requested_schema_version;
+    random_seed = session->random_seed;
+    emit_stride = session->solve_options.emit_stride;
+  }
 
   std::ostringstream oss;
   oss << "{"
@@ -186,141 +183,195 @@ auto BuildSummaryJson(const Config::AppConfig& config,
       << "\"schema\":" << kSupportedSchemaVersion << "},"
       << "\"status\":{"
       << "\"code\":" << status_code << ","
-      << "\"message\":\"" << safe_message << "\"},"
+      << "\"message\":\"" << JsonEscape(message) << "\"},"
       << "\"metrics\":{"
       << "\"elapsed_ms\":" << elapsed_ms << ","
-      << "\"frames\":" << frame_count << "},"
+      << "\"emit_stride\":" << emit_stride << "},"
       << "\"maze\":{"
       << "\"dimension\":" << static_cast<int>(config.maze.dimension) << ","
       << "\"width\":" << config.maze.width << ","
       << "\"height\":" << config.maze.height << "},"
       << "\"algorithms\":{"
-      << "\"generation\":\"" << safe_generation << "\","
-      << "\"search\":\"" << safe_search << "\"},"
+      << "\"generation\":\"" << JsonEscape(generation) << "\","
+      << "\"search\":\"" << JsonEscape(search) << "\"},"
       << "\"path\":{"
       << "\"found\":" << (found ? "true" : "false") << ","
-      << "\"length\":" << path_length << ","
-      << "\"start\":{"
-      << "\"x\":" << config.maze.start_node.second << ","
-      << "\"y\":" << config.maze.start_node.first << "},"
-      << "\"end\":{"
-      << "\"x\":" << config.maze.end_node.second << ","
-      << "\"y\":" << config.maze.end_node.first << "}"
-      << "},"
-      << "\"output\":{"
-      << "\"write_png\":" << (write_png ? "true" : "false") << ","
-      << "\"output_dir\":\"" << safe_output_dir << "\"},"
+      << "\"length\":" << path_length << "},"
       << "\"random_seed\":";
   if (random_seed.has_value()) {
     oss << *random_seed;
   } else {
     oss << "null";
   }
-  oss << ",\"error\":{"
-      << "\"code\":" << status_code << ","
-      << "\"message\":\"" << safe_message << "\"}"
-      << "}";
+  oss << "}";
   return oss.str();
 }
 
-struct ParsedRequest {
-  Config::AppConfig config;
-  bool write_png_output = false;
-  std::optional<int> random_seed;
-  int requested_schema_version = kSupportedSchemaVersion;
+auto MapEventType(MazeSolverDomain::SearchEventType event_type) -> int {
+  using SearchEventType = MazeSolverDomain::SearchEventType;
+  switch (event_type) {
+    case SearchEventType::kRunStarted:
+      return MAZE_EVENT_RUN_STARTED;
+    case SearchEventType::kCellStateChanged:
+      return MAZE_EVENT_CELL_STATE_CHANGED;
+    case SearchEventType::kPathUpdated:
+      return MAZE_EVENT_PATH_UPDATED;
+    case SearchEventType::kProgress:
+      return MAZE_EVENT_PROGRESS;
+    case SearchEventType::kRunFinished:
+      return MAZE_EVENT_RUN_FINISHED;
+    case SearchEventType::kRunCancelled:
+      return MAZE_EVENT_RUN_CANCELLED;
+    case SearchEventType::kRunFailed:
+      return MAZE_EVENT_RUN_FAILED;
+  }
+  return MAZE_EVENT_PROGRESS;
+}
+
+auto EncodeWallMask(const MazeDomain::MazeCell& cell) -> int {
+  int mask = 0;
+  if (cell.walls[kWallTop]) {
+    mask |= (1 << kWallTop);
+  }
+  if (cell.walls[kWallRight]) {
+    mask |= (1 << kWallRight);
+  }
+  if (cell.walls[kWallBottom]) {
+    mask |= (1 << kWallBottom);
+  }
+  if (cell.walls[kWallLeft]) {
+    mask |= (1 << kWallLeft);
+  }
+  return mask;
+}
+
+auto BuildTopologySnapshotJson(const MazeSession* session,
+                               const MazeDomain::MazeGrid& maze_grid,
+                               uint64_t seq) -> std::string {
+  const int height = static_cast<int>(maze_grid.size());
+  const int width = height > 0 ? static_cast<int>(maze_grid.front().size()) : 0;
+  const auto start =
+      (session != nullptr) ? session->config.maze.start_node
+                           : MazeSolverDomain::GridPosition{0, 0};
+  const auto end =
+      (session != nullptr) ? session->config.maze.end_node
+                           : MazeSolverDomain::GridPosition{0, 0};
+
+  std::ostringstream oss;
+  oss << "{"
+      << "\"seq\":" << seq << ","
+      << "\"type\":" << MAZE_EVENT_TOPOLOGY_SNAPSHOT << ","
+      << "\"width\":" << width << ","
+      << "\"height\":" << height << ","
+      << "\"start\":{\"row\":" << start.first << ",\"col\":" << start.second
+      << "},"
+      << "\"end\":{\"row\":" << end.first << ",\"col\":" << end.second << "},"
+      << "\"wall_mask_order\":\"TRBL\","
+      << "\"walls\":[";
+  for (int row = 0; row < height; ++row) {
+    for (int col = 0; col < width; ++col) {
+      if (row > 0 || col > 0) {
+        oss << ",";
+      }
+      oss << EncodeWallMask(maze_grid[row][col]);
+    }
+  }
+  oss << "]}";
+  return oss.str();
+}
+
+auto BuildEventJson(const MazeSolverDomain::SearchEvent& event, uint64_t seq)
+    -> std::string {
+  std::ostringstream oss;
+  oss << "{"
+      << "\"seq\":" << seq << ","
+      << "\"type\":" << MapEventType(event.type) << ","
+      << "\"visited_count\":" << event.visited_count << ","
+      << "\"frontier_count\":" << event.frontier_count << ","
+      << "\"found\":" << (event.found ? "true" : "false") << ","
+      << "\"message\":\"" << JsonEscape(event.message) << "\","
+      << "\"path\":[";
+  for (size_t i = 0; i < event.path.size(); ++i) {
+    if (i > 0) {
+      oss << ",";
+    }
+    oss << "{\"row\":" << event.path[i].first
+        << ",\"col\":" << event.path[i].second << "}";
+  }
+  oss << "],\"deltas\":[";
+  for (size_t i = 0; i < event.deltas.size(); ++i) {
+    if (i > 0) {
+      oss << ",";
+    }
+    oss << "{\"row\":" << event.deltas[i].row
+        << ",\"col\":" << event.deltas[i].col
+        << ",\"state\":" << static_cast<int>(event.deltas[i].state) << "}";
+  }
+  oss << "]}";
+  return oss.str();
+}
+
+void EmitTopologySnapshot(MazeSession* session,
+                          const MazeDomain::MazeGrid& maze_grid) {
+  if (session == nullptr || session->event_callback == nullptr) {
+    return;
+  }
+  const uint64_t seq = NextEventSeq(session);
+  session->event_json_cache =
+      BuildTopologySnapshotJson(session, maze_grid, seq);
+  MazeEvent event{
+      .seq = seq,
+      .type = MAZE_EVENT_TOPOLOGY_SNAPSHOT,
+      .payload = session->event_json_cache.data(),
+      .payload_size = session->event_json_cache.size()};
+  session->event_callback(&event, session->event_callback_user_data);
+}
+
+class SessionEventSink final : public MazeSolverDomain::ISearchEventSink {
+ public:
+  explicit SessionEventSink(MazeSession* session) : session_(session) {}
+
+  void OnEvent(const MazeSolverDomain::SearchEvent& event) override {
+    if (session_ == nullptr || session_->event_callback == nullptr) {
+      return;
+    }
+    const uint64_t seq = NextEventSeq(session_);
+    session_->event_json_cache = BuildEventJson(event, seq);
+    MazeEvent c_event{
+        .seq = seq,
+        .type = MapEventType(event.type),
+        .payload = session_->event_json_cache.data(),
+        .payload_size = session_->event_json_cache.size()};
+    session_->event_callback(&c_event, session_->event_callback_user_data);
+  }
+
+  auto ShouldCancel() const -> bool override {
+    if (session_ == nullptr) {
+      return false;
+    }
+    return session_->cancel_requested.load();
+  }
+
+ private:
+  MazeSession* session_ = nullptr;
 };
 
-auto CurrentGenerationAlgorithmName(const Config::AppConfig& config)
-    -> std::string {
-  if (config.maze.generation_algorithms.empty()) {
-    return "";
-  }
-  return config.maze.generation_algorithms.front().name;
-}
-
-auto CurrentSearchAlgorithmName(const Config::AppConfig& config) -> std::string {
-  if (config.maze.search_algorithms.empty()) {
-    return "";
-  }
-  return config.maze.search_algorithms.front().name;
-}
-
-auto BuildHandleSummary(const MazeHandle* handle, int frame_count, bool found,
-                        int path_length, long long elapsed_ms, int status_code,
-                        const std::string& message) -> std::string {
-  if (handle == nullptr) {
-    Config::AppConfig empty_config;
-    return BuildSummaryJson(empty_config, "", "", frame_count, found,
-                            path_length, elapsed_ms, kSupportedSchemaVersion,
-                            false, std::nullopt, status_code, message);
-  }
-  return BuildSummaryJson(
-      handle->config, CurrentGenerationAlgorithmName(handle->config),
-      CurrentSearchAlgorithmName(handle->config), frame_count, found, path_length,
-      elapsed_ms, handle->requested_schema_version, handle->write_png_output,
-      handle->random_seed, status_code, message);
-}
-
-auto ConvertToRgba(const MazeSolver::RenderBuffer& input_buffer,
-                   ApiFrameBuffer& output_buffer, std::string& error) -> bool {
-  if (input_buffer.width <= 0 || input_buffer.height <= 0 ||
-      input_buffer.channels <= 0) {
-    error = "Invalid input frame buffer dimensions.";
-    return false;
-  }
-  if (input_buffer.pixels.empty()) {
-    error = "Input frame buffer is empty.";
-    return false;
-  }
-
-  const size_t pixel_count = static_cast<size_t>(input_buffer.width) *
-                             static_cast<size_t>(input_buffer.height);
-  const size_t src_size = pixel_count * static_cast<size_t>(input_buffer.channels);
-  if (input_buffer.pixels.size() != src_size) {
-    error = "Input frame buffer size mismatch.";
-    return false;
-  }
-
-  output_buffer.width = input_buffer.width;
-  output_buffer.height = input_buffer.height;
-  output_buffer.channels = kRgbaChannels;
-  output_buffer.pixels.assign(pixel_count * static_cast<size_t>(kRgbaChannels), 0);
-
-  if (input_buffer.channels == kRgbaChannels) {
-    output_buffer.pixels = input_buffer.pixels;
-    return true;
-  }
-  if (input_buffer.channels != 3) {
-    error = "Unsupported input channels for RGBA conversion.";
-    return false;
-  }
-
-  for (size_t index = 0; index < pixel_count; ++index) {
-    const size_t src = index * 3;
-    const size_t dst = index * static_cast<size_t>(kRgbaChannels);
-    output_buffer.pixels[dst + 0] = input_buffer.pixels[src + 0];
-    output_buffer.pixels[dst + 1] = input_buffer.pixels[src + 1];
-    output_buffer.pixels[dst + 2] = input_buffer.pixels[src + 2];
-    output_buffer.pixels[dst + 3] = 255;
-  }
-  return true;
-}
-
-auto ParseRequestJson(MazeHandle* handle, const std::string& request_json) -> int {
-  if (handle == nullptr) {
+auto ParseRequestJson(MazeSession* session, const std::string& request_json)
+    -> int {
+  if (session == nullptr) {
     return MAZE_STATUS_INVALID_ARGUMENT;
   }
-  ParsedRequest parsed;
-  parsed.requested_schema_version =
+
+  session->requested_schema_version =
       ExtractIntValue(request_json, "schema_version", kSupportedSchemaVersion);
-  if (parsed.requested_schema_version <= 0) {
-    return SetError(handle, MAZE_STATUS_INVALID_ARGUMENT,
+  if (session->requested_schema_version <= 0) {
+    return SetError(session, MAZE_STATUS_INVALID_ARGUMENT,
                     "schema_version must be a positive integer.");
   }
-  if (parsed.requested_schema_version != kSupportedSchemaVersion) {
-    return SetError(handle, MAZE_STATUS_INVALID_ARGUMENT,
+  if (session->requested_schema_version != kSupportedSchemaVersion) {
+    return SetError(session, MAZE_STATUS_INVALID_ARGUMENT,
                     "Unsupported schema_version: " +
-                        std::to_string(parsed.requested_schema_version));
+                        std::to_string(session->requested_schema_version));
   }
 
   const std::string request_scope =
@@ -331,16 +382,17 @@ auto ParseRequestJson(MazeHandle* handle, const std::string& request_json) -> in
       ExtractObjectValue(request_scope, "algorithms").value_or(request_scope);
   const std::string visualization_scope =
       ExtractObjectValue(request_scope, "visualization").value_or(request_scope);
-  const std::string output_scope =
-      ExtractObjectValue(request_scope, "output").value_or(request_scope);
+  const std::string stream_scope =
+      ExtractObjectValue(request_scope, "stream").value_or(std::string{});
   const std::optional<std::string> start_scope =
       ExtractObjectValue(maze_scope, "start");
   const std::optional<std::string> end_scope = ExtractObjectValue(maze_scope, "end");
 
-  parsed.config.maze.dimension = Config::MazeRuntimeDimension::D2;
-  parsed.config.maze.width = ExtractIntValue(maze_scope, "width", 10);
-  parsed.config.maze.height = ExtractIntValue(maze_scope, "height", 10);
-  parsed.config.maze.unit_pixels =
+  Config::AppConfig config;
+  config.maze.dimension = Config::MazeRuntimeDimension::D2;
+  config.maze.width = ExtractIntValue(maze_scope, "width", 10);
+  config.maze.height = ExtractIntValue(maze_scope, "height", 10);
+  config.maze.unit_pixels =
       ExtractIntValue(visualization_scope, "unit_pixels",
                       ExtractIntValue(maze_scope, "unit_pixels", 12));
 
@@ -352,85 +404,132 @@ auto ParseRequestJson(MazeHandle* handle, const std::string& request_json) -> in
                           ? ExtractIntValue(*start_scope, "x",
                                             ExtractIntValue(maze_scope, "start_x", 0))
                           : ExtractIntValue(maze_scope, "start_x", 0);
-  const int end_default_y = parsed.config.maze.height - 1;
-  const int end_default_x = parsed.config.maze.width - 1;
-  const int end_y =
-      end_scope.has_value()
-          ? ExtractIntValue(*end_scope, "y",
-                            ExtractIntValue(maze_scope, "end_y", end_default_y))
-          : ExtractIntValue(maze_scope, "end_y", end_default_y);
-  const int end_x =
-      end_scope.has_value()
-          ? ExtractIntValue(*end_scope, "x",
-                            ExtractIntValue(maze_scope, "end_x", end_default_x))
-          : ExtractIntValue(maze_scope, "end_x", end_default_x);
-  parsed.config.maze.start_node = {start_y, start_x};
-  parsed.config.maze.end_node = {end_y, end_x};
-  parsed.config.output_dir = ExtractStringValue(
-      output_scope, "output_dir", ExtractStringValue(request_json, "output_dir", "."));
-  parsed.write_png_output = ExtractBoolValue(
-      output_scope, "write_png", ExtractBoolValue(request_json, "write_png", false));
-  parsed.random_seed = ExtractOptionalIntValue(request_scope, "random_seed");
+  const int end_default_y = config.maze.height - 1;
+  const int end_default_x = config.maze.width - 1;
+  const int end_y = end_scope.has_value()
+                        ? ExtractIntValue(*end_scope, "y",
+                                          ExtractIntValue(maze_scope, "end_y", end_default_y))
+                        : ExtractIntValue(maze_scope, "end_y", end_default_y);
+  const int end_x = end_scope.has_value()
+                        ? ExtractIntValue(*end_scope, "x",
+                                          ExtractIntValue(maze_scope, "end_x", end_default_x))
+                        : ExtractIntValue(maze_scope, "end_x", end_default_x);
+  config.maze.start_node = {start_y, start_x};
+  config.maze.end_node = {end_y, end_x};
 
-  if (parsed.config.maze.width <= 0 || parsed.config.maze.height <= 0 ||
-      parsed.config.maze.unit_pixels <= 0) {
-    return SetError(handle, MAZE_STATUS_INVALID_ARGUMENT,
-                    "Invalid width/height/unit_pixels in JSON request.");
+  if (config.maze.width <= 0 || config.maze.height <= 0 ||
+      config.maze.unit_pixels <= 0) {
+    return SetError(session, MAZE_STATUS_INVALID_ARGUMENT,
+                    "Invalid width/height/unit_pixels in request.");
   }
-  if (parsed.config.maze.start_node.first < 0 || parsed.config.maze.start_node.second < 0 ||
-      parsed.config.maze.start_node.first >= parsed.config.maze.height ||
-      parsed.config.maze.start_node.second >= parsed.config.maze.width) {
-    return SetError(handle, MAZE_STATUS_INVALID_ARGUMENT,
-                    "Invalid start position in JSON request.");
+  if (config.maze.start_node.first < 0 || config.maze.start_node.second < 0 ||
+      config.maze.start_node.first >= config.maze.height ||
+      config.maze.start_node.second >= config.maze.width) {
+    return SetError(session, MAZE_STATUS_INVALID_ARGUMENT,
+                    "Invalid start position in request.");
   }
-  if (parsed.config.maze.end_node.first < 0 || parsed.config.maze.end_node.second < 0 ||
-      parsed.config.maze.end_node.first >= parsed.config.maze.height ||
-      parsed.config.maze.end_node.second >= parsed.config.maze.width) {
-    return SetError(handle, MAZE_STATUS_INVALID_ARGUMENT,
-                    "Invalid end position in JSON request.");
+  if (config.maze.end_node.first < 0 || config.maze.end_node.second < 0 ||
+      config.maze.end_node.first >= config.maze.height ||
+      config.maze.end_node.second >= config.maze.width) {
+    return SetError(session, MAZE_STATUS_INVALID_ARGUMENT,
+                    "Invalid end position in request.");
   }
 
   const std::string generation_algo_name =
-      ExtractStringValue(algorithms_scope, "generation",
-                         ExtractStringValue(request_json, "generation_algorithm", "DFS"));
+      ExtractStringValue(algorithms_scope, "generation", "DFS");
   MazeDomain::MazeAlgorithmType generation_algo = MazeDomain::MazeAlgorithmType::DFS;
   if (!MazeGeneration::try_parse_algorithm(generation_algo_name, generation_algo)) {
-    return SetError(handle, MAZE_STATUS_INVALID_ARGUMENT,
-                    "Unsupported generation_algorithm: " + generation_algo_name);
+    return SetError(session, MAZE_STATUS_INVALID_ARGUMENT,
+                    "Unsupported generation algorithm: " + generation_algo_name);
   }
-  parsed.config.maze.generation_algorithms = {
+  config.maze.generation_algorithms = {
       {generation_algo, MazeGeneration::algorithm_name(generation_algo)}};
 
   const std::string solver_algo_name =
-      ExtractStringValue(algorithms_scope, "search",
-                         ExtractStringValue(request_json, "search_algorithm", "BFS"));
+      ExtractStringValue(algorithms_scope, "search", "BFS");
   MazeSolver::SolverAlgorithmType solver_algo = MazeSolver::SolverAlgorithmType::BFS;
   if (!MazeSolver::TryParseAlgorithm(solver_algo_name, solver_algo)) {
-    return SetError(handle, MAZE_STATUS_INVALID_ARGUMENT,
-                    "Unsupported search_algorithm: " + solver_algo_name);
+    return SetError(session, MAZE_STATUS_INVALID_ARGUMENT,
+                    "Unsupported search algorithm: " + solver_algo_name);
   }
-  parsed.config.maze.search_algorithms = {
+  config.maze.search_algorithms = {
       {solver_algo, MazeSolver::AlgorithmName(solver_algo)}};
 
-  handle->config = std::move(parsed.config);
-  handle->write_png_output = parsed.write_png_output;
-  handle->random_seed = parsed.random_seed;
-  handle->requested_schema_version = parsed.requested_schema_version;
-  handle->has_request = true;
+  session->solve_options.emit_stride =
+      stream_scope.empty() ? 1 : ExtractIntValue(stream_scope, "emit_stride", 1);
+  if (session->solve_options.emit_stride <= 0) {
+    session->solve_options.emit_stride = 1;
+  }
+  session->solve_options.emit_progress =
+      ExtractIntValue(stream_scope, "emit_progress", 1) != 0;
+
+  session->random_seed = ExtractOptionalIntValue(request_scope, "random_seed");
+  session->config = std::move(config);
+  session->configured = true;
+  session->last_error.clear();
   return MAZE_STATUS_OK;
 }
 
-auto ExecuteCurrentRequest(MazeHandle* handle) -> int {
-  if (handle == nullptr) {
+}  // namespace
+
+extern "C" {
+
+auto MazeApiVersion(void) -> const char* { return kApiVersion; }
+
+auto MazeSessionCreate(MazeSession** out_session) -> int {
+  if (out_session == nullptr) {
     return MAZE_STATUS_INVALID_ARGUMENT;
   }
-  if (!handle->has_request) {
-    return SetError(handle, MAZE_STATUS_INVALID_ARGUMENT,
-                    "No request loaded. Call MazeRunFromJson first.");
+  MazeSession* session = new (std::nothrow) MazeSession();
+  if (session == nullptr) {
+    return MAZE_STATUS_INTERNAL_ERROR;
+  }
+  session->summary_json = BuildSummaryJson(
+      session, "", "", false, 0, 0, MAZE_STATUS_OK, "empty");
+  *out_session = session;
+  return MAZE_STATUS_OK;
+}
+
+void MazeSessionDestroy(MazeSession* session) { delete session; }
+
+auto MazeSessionConfigure(MazeSession* session, const char* request_json) -> int {
+  if (session == nullptr || request_json == nullptr) {
+    return MAZE_STATUS_INVALID_ARGUMENT;
+  }
+  return ParseRequestJson(session, request_json);
+}
+
+auto MazeSessionSetEventCallback(MazeSession* session,
+                                 MazeEventCallback callback,
+                                 void* user_data) -> int {
+  if (session == nullptr) {
+    return MAZE_STATUS_INVALID_ARGUMENT;
+  }
+  session->event_callback = callback;
+  session->event_callback_user_data = user_data;
+  return MAZE_STATUS_OK;
+}
+
+auto MazeSessionRun(MazeSession* session) -> int {
+  if (session == nullptr) {
+    return MAZE_STATUS_INVALID_ARGUMENT;
+  }
+  if (!session->configured) {
+    return SetError(session, MAZE_STATUS_INVALID_ARGUMENT,
+                    "Session is not configured. Call MazeSessionConfigure first.");
   }
 
   const auto run_start = std::chrono::steady_clock::now();
-  auto& config = handle->config;
+  session->cancel_requested.store(false);
+  session->next_event_seq = 1;
+
+  if (session->config.maze.generation_algorithms.empty() ||
+      session->config.maze.search_algorithms.empty()) {
+    return SetError(session, MAZE_STATUS_INVALID_ARGUMENT,
+                    "Missing generation or search algorithm.");
+  }
+
+  auto& config = session->config;
   auto maze_grid = MazeDomain::MazeGrid(
       static_cast<size_t>(config.maze.height),
       MazeDomain::MazeGrid::value_type(static_cast<size_t>(config.maze.width)));
@@ -444,160 +543,56 @@ auto ExecuteCurrentRequest(MazeHandle* handle) -> int {
       maze_grid, topology, generation_algo, solver_algo, config);
   runtime_context.start_node_ = config.maze.start_node;
   MazeGeneration::generate_maze_structure(runtime_context);
-  const MazeSolver::SearchResult result = MazeSolver::Solve(runtime_context);
+  EmitTopologySnapshot(session, maze_grid);
 
-  handle->frame_buffers.clear();
-  handle->frame_buffers.reserve(result.frames_.size());
-  for (const auto& frame : result.frames_) {
-    MazeSolver::RenderBuffer rgb_buffer;
-    ApiFrameBuffer rgba_buffer;
-    std::string render_error;
-    if (!MazeSolver::RenderFrameToBuffer(frame, maze_grid, config, rgb_buffer,
-                                         render_error)) {
-      return SetError(handle, MAZE_STATUS_INTERNAL_ERROR, render_error);
-    }
-    if (!ConvertToRgba(rgb_buffer, rgba_buffer, render_error)) {
-      return SetError(handle, MAZE_STATUS_INTERNAL_ERROR, render_error);
-    }
-    if (handle->frame_callback != nullptr) {
-      handle->frame_callback(rgba_buffer.pixels.data(), rgba_buffer.pixels.size(),
-                             rgba_buffer.width, rgba_buffer.height,
-                             rgba_buffer.channels,
-                             handle->frame_callback_user_data);
-    }
-    handle->frame_buffers.push_back(std::move(rgba_buffer));
-  }
-
-  if (handle->write_png_output) {
-    const auto render_result = MazeSolver::RenderSearchResult(
-        result, maze_grid, solver_algo,
-        MazeGeneration::algorithm_name(generation_algo), config);
-    if (!render_result.ok) {
-      return SetError(handle, MAZE_STATUS_INTERNAL_ERROR, render_result.error);
-    }
-  }
+  SessionEventSink sink(session);
+  const MazeSolver::SearchResult result =
+      MazeSolver::Solve(runtime_context, &sink, session->solve_options);
 
   const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                               std::chrono::steady_clock::now() - run_start)
                               .count();
-  handle->summary_json = BuildHandleSummary(
-      handle, static_cast<int>(handle->frame_buffers.size()), result.found_,
+
+  if (result.cancelled_) {
+    session->last_error = "Cancelled by caller.";
+    session->summary_json = BuildSummaryJson(
+        session, MazeGeneration::algorithm_name(generation_algo),
+        MazeSolver::AlgorithmName(solver_algo), false, 0, elapsed_ms,
+        MAZE_STATUS_CANCELLED, session->last_error);
+    return MAZE_STATUS_CANCELLED;
+  }
+
+  session->last_error.clear();
+  session->summary_json = BuildSummaryJson(
+      session, MazeGeneration::algorithm_name(generation_algo),
+      MazeSolver::AlgorithmName(solver_algo), result.found_,
       static_cast<int>(result.path_.size()), elapsed_ms, MAZE_STATUS_OK, "ok");
-  handle->last_error.clear();
   return MAZE_STATUS_OK;
 }
 
-}  // namespace
-
-extern "C" {
-
-auto MazeApiVersion(void) -> const char* { return kApiVersion; }
-
-auto MazeCreateHandle(MazeHandle** out_handle) -> int {
-  if (out_handle == nullptr) {
+auto MazeSessionCancel(MazeSession* session) -> int {
+  if (session == nullptr) {
     return MAZE_STATUS_INVALID_ARGUMENT;
   }
-  MazeHandle* handle = new (std::nothrow) MazeHandle();
-  if (handle == nullptr) {
-    return MAZE_STATUS_INTERNAL_ERROR;
-  }
-  handle->summary_json =
-      BuildHandleSummary(handle, 0, false, 0, 0, MAZE_STATUS_OK, "empty");
-  *out_handle = handle;
+  session->cancel_requested.store(true);
   return MAZE_STATUS_OK;
 }
 
-void MazeDestroyHandle(MazeHandle* handle) { delete handle; }
-
-auto MazeGetLastError(const MazeHandle* handle) -> const char* {
-  if (handle == nullptr) {
-    return "MazeHandle is null.";
-  }
-  return handle->last_error.c_str();
-}
-
-auto MazeGetSummaryJson(const MazeHandle* handle) -> const char* {
-  if (handle == nullptr) {
-    return "{}";
-  }
-  return handle->summary_json.c_str();
-}
-
-auto MazeSetFrameCallback(MazeHandle* handle, MazeFrameCallback callback,
-                          void* user_data) -> int {
-  if (handle == nullptr) {
+auto MazeSessionGetSummaryJson(const MazeSession* session,
+                               const char** out_json) -> int {
+  if (session == nullptr || out_json == nullptr) {
     return MAZE_STATUS_INVALID_ARGUMENT;
   }
-  handle->frame_callback = callback;
-  handle->frame_callback_user_data = user_data;
+  *out_json = session->summary_json.c_str();
   return MAZE_STATUS_OK;
 }
 
-auto MazeRunFromJson(MazeHandle* handle, const char* request_json) -> int {
-  if (handle == nullptr || request_json == nullptr) {
+auto MazeSessionGetLastError(const MazeSession* session,
+                             const char** out_error) -> int {
+  if (session == nullptr || out_error == nullptr) {
     return MAZE_STATUS_INVALID_ARGUMENT;
   }
-  const std::string request_text = request_json;
-  handle->requested_schema_version =
-      ExtractIntValue(request_text, "schema_version", kSupportedSchemaVersion);
-  const int parse_code = ParseRequestJson(handle, request_text);
-  if (parse_code != MAZE_STATUS_OK) {
-    handle->summary_json =
-        BuildHandleSummary(handle, 0, false, 0, 0, parse_code, handle->last_error);
-    return parse_code;
-  }
-  const int run_code = ExecuteCurrentRequest(handle);
-  if (run_code != MAZE_STATUS_OK) {
-    handle->summary_json = BuildHandleSummary(
-        handle, static_cast<int>(handle->frame_buffers.size()), false, 0, 0,
-        run_code, handle->last_error);
-  }
-  return run_code;
-}
-
-auto MazeRun(MazeHandle* handle) -> int {
-  if (handle == nullptr) {
-    return MAZE_STATUS_INVALID_ARGUMENT;
-  }
-  if (!handle->has_request) {
-    handle->last_error = kNotImplemented;
-    return MAZE_STATUS_NOT_IMPLEMENTED;
-  }
-  const int run_code = ExecuteCurrentRequest(handle);
-  if (run_code != MAZE_STATUS_OK) {
-    handle->summary_json = BuildHandleSummary(
-        handle, static_cast<int>(handle->frame_buffers.size()), false, 0, 0,
-        run_code, handle->last_error);
-  }
-  return run_code;
-}
-
-auto MazeGetFrameCount(const MazeHandle* handle, int* out_count) -> int {
-  if (handle == nullptr || out_count == nullptr) {
-    return MAZE_STATUS_INVALID_ARGUMENT;
-  }
-  *out_count = static_cast<int>(handle->frame_buffers.size());
-  return MAZE_STATUS_OK;
-}
-
-auto MazeGetFrameRgba(const MazeHandle* handle, int frame_index,
-                      unsigned char* out_rgba, size_t out_rgba_size,
-                      int* out_width, int* out_height) -> int {
-  if (handle == nullptr || out_width == nullptr || out_height == nullptr) {
-    return MAZE_STATUS_INVALID_ARGUMENT;
-  }
-  if (frame_index < 0 ||
-      frame_index >= static_cast<int>(handle->frame_buffers.size())) {
-    return MAZE_STATUS_INVALID_ARGUMENT;
-  }
-  const auto& buffer = handle->frame_buffers[static_cast<size_t>(frame_index)];
-  *out_width = buffer.width;
-  *out_height = buffer.height;
-  const size_t required_size = buffer.pixels.size();
-  if (out_rgba == nullptr || out_rgba_size < required_size) {
-    return MAZE_STATUS_INVALID_ARGUMENT;
-  }
-  std::memcpy(out_rgba, buffer.pixels.data(), required_size);
+  *out_error = session->last_error.c_str();
   return MAZE_STATUS_OK;
 }
 

@@ -7,6 +7,7 @@
 #include "cli/commands/generation_algorithms_command.h"
 #include "cli/commands/search_algorithms_command.h"
 #include "common/version.hpp"
+#include "common/kernel_version.hpp"
 
 namespace Cli {
 
@@ -54,7 +55,9 @@ auto HandleImmediateOption(const std::string& token,
     return outcome;
   }
   if (IsVersionToken(token)) {
-    ctx.out << MazeCommon::kVersion << "\n";
+    ctx.out << MazeCommon::kVersionDisplayPrefix << MazeCommon::kCliVersion
+            << MazeCommon::kKernelDisplayPrefix << MazeKernel::kKernelVersion
+            << "\n";
     outcome.consumed = true;
     outcome.handled = true;
     outcome.exit_code = 0;

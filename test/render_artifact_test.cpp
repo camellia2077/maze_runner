@@ -2,11 +2,12 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "application/services/maze_generation.h"
 #include "application/services/maze_runtime_context.h"
 #include "application/services/maze_solver.h"
-#include "infrastructure/graphics/maze_renderer.h"
+#include "export/maze_export.h"
 
 namespace {
 
@@ -38,6 +39,49 @@ auto FileCountInFolder(const fs::path& folder_path) -> size_t {
   return count;
 }
 
+class FrameCollectorSink final : public MazeSolverDomain::ISearchEventSink {
+ public:
+  FrameCollectorSink(int height, int width) {
+    current_frame_.visual_states_.assign(
+        static_cast<size_t>(height),
+        std::vector<MazeSolverDomain::SolverCellState>(
+            static_cast<size_t>(width), MazeSolverDomain::SolverCellState::NONE));
+  }
+
+  void OnEvent(const MazeSolverDomain::SearchEvent& event) override {
+    if (event.type != MazeSolverDomain::SearchEventType::kProgress) {
+      return;
+    }
+    for (const auto& delta : event.deltas) {
+      if (delta.row < 0 ||
+          delta.row >= static_cast<int>(current_frame_.visual_states_.size())) {
+        continue;
+      }
+      if (delta.col < 0 || current_frame_.visual_states_.empty() ||
+          delta.col >=
+              static_cast<int>(current_frame_.visual_states_.front().size())) {
+        continue;
+      }
+      current_frame_.visual_states_[delta.row][delta.col] = delta.state;
+    }
+    current_frame_.current_path_ = event.path;
+    if (event.deltas.empty() && event.path.empty()) {
+      return;
+    }
+    frames_.push_back(current_frame_);
+  }
+
+  auto ShouldCancel() const -> bool override { return false; }
+
+  auto Frames() const -> const std::vector<MazeSolverDomain::SearchFrame>& {
+    return frames_;
+  }
+
+ private:
+  MazeSolverDomain::SearchFrame current_frame_;
+  std::vector<MazeSolverDomain::SearchFrame> frames_;
+};
+
 }  // namespace
 
 auto main() -> int {
@@ -65,27 +109,33 @@ auto main() -> int {
       maze_grid, topology, MazeGeneration::MazeAlgorithmType::DFS,
       MazeSolver::SolverAlgorithmType::BFS, config);
   MazeGeneration::generate_maze_structure(runtime_context);
-  const MazeSolver::SearchResult result = MazeSolver::Solve(runtime_context);
-  const auto render_result = MazeSolver::RenderSearchResult(
-      result, maze_grid, runtime_context.solver_algorithm_,
-      MazeGeneration::algorithm_name(runtime_context.generation_algorithm_),
-      config);
-
-  if (!render_result.ok) {
-    std::cerr << "[FAIL] Render failed: " << render_result.error << "\n";
-    return 1;
-  }
-  if (render_result.frames_written == 0) {
-    std::cerr << "[FAIL] Render produced zero frames.\n";
+  FrameCollectorSink sink(config.maze.height, config.maze.width);
+  MazeSolver::SolveOptions options;
+  options.emit_stride = 1;
+  options.emit_progress = true;
+  MazeSolver::Solve(runtime_context, &sink, options);
+  if (sink.Frames().empty()) {
+    std::cerr << "[FAIL] No progress frames collected from solver.\n";
     return 1;
   }
 
-  const fs::path output_folder = render_result.output_folder;
-  if (!fs::exists(output_folder)) {
-    std::cerr << "[FAIL] Output folder not found: " << output_folder.string()
-              << "\n";
+  const fs::path output_root = ResolveOutputRoot();
+  std::error_code fs_error;
+  fs::create_directories(output_root, fs_error);
+  if (fs_error) {
+    std::cerr << "[FAIL] Failed to create output folder: "
+              << output_root.string() << "\n";
     return 1;
   }
+  const auto export_result = MazeExport::ExportFramesToPngSequence(
+      sink.Frames(), maze_grid, config, "bfs/DFS");
+  if (!export_result.ok) {
+    std::cerr << "[FAIL] ExportFramesToPngSequence failed: "
+              << export_result.error << "\n";
+    return 1;
+  }
+
+  const fs::path output_folder = export_result.output_folder;
   const size_t file_count = FileCountInFolder(output_folder);
   if (file_count == 0) {
     std::cerr << "[FAIL] No files written to: " << output_folder.string()

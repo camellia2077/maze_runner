@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"C:/Computer/my_github/github_cpp/maze/Maze_Generator/build_release/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

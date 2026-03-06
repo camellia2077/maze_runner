@@ -10,13 +10,22 @@ if(BUILD_TESTING)
         test/solver_algorithms_test.cpp
         test/render_buffer_test.cpp
         test/maze_api_c_test.cpp
+        test/win_gui_parser_test.cpp
+        test/win_gui_state_store_test.cpp
+        test/win_gui_rasterizer_test.cpp
+        test/solver_event_emitter_test.cpp
+        test/solver_result_builder_test.cpp
         apps/maze_cli/cli/framework/cli_app.cpp
         apps/maze_cli/cli/commands/generation_algorithms_command.cpp
         apps/maze_cli/cli/commands/search_algorithms_command.cpp
+        apps/maze_win_gui/src/event/maze_event_parser.cpp
+        apps/maze_win_gui/src/state/gui_state_store.cpp
+        apps/maze_win_gui/src/render/maze_rasterizer.cpp
     )
 
     target_include_directories(maze_unit_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/maze_cli
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/maze_win_gui
         ${CMAKE_CURRENT_SOURCE_DIR}/libs/maze_core
         ${CMAKE_CURRENT_SOURCE_DIR}/libs/maze_infra
         ${CMAKE_CURRENT_SOURCE_DIR}/libs/maze_api_c
@@ -29,7 +38,7 @@ if(BUILD_TESTING)
         target_compile_options(maze_unit_tests PRIVATE /W4)
     endif()
 
-    target_link_libraries(maze_unit_tests PRIVATE maze_core maze_infra maze_api_c)
+    target_link_libraries(maze_unit_tests PRIVATE maze_core maze_infra maze_export maze_api_c)
 
     add_test(NAME maze_unit_tests COMMAND maze_unit_tests)
 
@@ -54,7 +63,7 @@ if(BUILD_TESTING)
         target_compile_options(maze_render_tests PRIVATE /W4)
     endif()
 
-    target_link_libraries(maze_render_tests PRIVATE maze_core maze_infra)
+    target_link_libraries(maze_render_tests PRIVATE maze_core maze_export)
 
     add_test(NAME maze_render_tests COMMAND maze_render_tests)
     set_tests_properties(maze_render_tests PROPERTIES LABELS "png;artifact")

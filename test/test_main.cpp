@@ -36,6 +36,11 @@ auto main() -> int {
   total_failures += RunSuite("SolverAlgorithms", RunSolverAlgorithmTests);
   total_failures += RunSuite("RenderBuffer", RunRenderBufferTests);
   total_failures += RunSuite("MazeApiC", RunMazeApiCTests);
+  total_failures += RunSuite("WinGuiParser", RunWinGuiParserTests);
+  total_failures += RunSuite("WinGuiStateStore", RunWinGuiStateStoreTests);
+  total_failures += RunSuite("WinGuiRasterizer", RunWinGuiRasterizerTests);
+  total_failures += RunSuite("SolverEventEmitter", RunSolverEventEmitterTests);
+  total_failures += RunSuite("SolverResultBuilder", RunSolverResultBuilderTests);
 
   if (total_failures == 0) {
     std::cout << "All tests passed.\n";

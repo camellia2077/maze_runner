@@ -1,0 +1,12 @@
+#ifndef MAZE_CORE_COMMON_KERNEL_VERSION_HPP
+#define MAZE_CORE_COMMON_KERNEL_VERSION_HPP
+
+#include <string_view>
+
+namespace MazeKernel {
+
+constexpr std::string_view kKernelVersion = "@MAZE_KERNEL_VERSION@";
+
+}  // namespace MazeKernel
+
+#endif  // MAZE_CORE_COMMON_KERNEL_VERSION_HPP

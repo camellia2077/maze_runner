@@ -38,6 +38,44 @@ auto BuildTestConfig(const fs::path& output_dir) -> Config::AppConfig {
   return config;
 }
 
+class FrameCaptureSink final : public MazeSolverDomain::ISearchEventSink {
+ public:
+  FrameCaptureSink(int height, int width) {
+    frame_.visual_states_.assign(
+        static_cast<size_t>(height),
+        std::vector<MazeSolverDomain::SolverCellState>(
+            static_cast<size_t>(width), MazeSolverDomain::SolverCellState::NONE));
+  }
+
+  void OnEvent(const MazeSolverDomain::SearchEvent& event) override {
+    if (captured_ || event.type != MazeSolverDomain::SearchEventType::kProgress) {
+      return;
+    }
+    for (const auto& delta : event.deltas) {
+      if (delta.row < 0 ||
+          delta.row >= static_cast<int>(frame_.visual_states_.size())) {
+        continue;
+      }
+      if (delta.col < 0 || frame_.visual_states_.empty() ||
+          delta.col >= static_cast<int>(frame_.visual_states_.front().size())) {
+        continue;
+      }
+      frame_.visual_states_[delta.row][delta.col] = delta.state;
+    }
+    frame_.current_path_ = event.path;
+    captured_ = !event.deltas.empty() || !event.path.empty();
+  }
+
+  auto ShouldCancel() const -> bool override { return false; }
+
+  auto HasFrame() const -> bool { return captured_; }
+  auto Frame() const -> const MazeSolverDomain::SearchFrame& { return frame_; }
+
+ private:
+  bool captured_ = false;
+  MazeSolverDomain::SearchFrame frame_;
+};
+
 }  // namespace
 
 auto RunRenderBufferTests() -> int {
@@ -60,18 +98,23 @@ auto RunRenderBufferTests() -> int {
       maze_grid, topology, MazeDomain::MazeAlgorithmType::DFS,
       MazeSolverDomain::SolverAlgorithmType::BFS, config);
   MazeGeneration::generate_maze_structure(runtime_context);
-  const MazeSolverDomain::SearchResult result = MazeSolver::Solve(runtime_context);
+  FrameCaptureSink sink(config.maze.height, config.maze.width);
+  MazeSolver::SolveOptions options;
+  options.emit_stride = 1;
+  options.emit_progress = true;
+  const MazeSolverDomain::SearchResult result =
+      MazeSolver::Solve(runtime_context, &sink, options);
 
-  ExpectTrue(!result.frames_.empty(), "Solver frames should not be empty",
+  ExpectTrue(sink.HasFrame(), "Solver should emit at least one progress frame",
              failures);
-  if (result.frames_.empty()) {
+  if (!sink.HasFrame()) {
     return failures;
   }
 
   MazeSolver::RenderBuffer buffer;
   std::string error;
   const bool render_ok = MazeSolver::RenderFrameToBuffer(
-      result.frames_.front(), maze_grid, config, buffer, error);
+      sink.Frame(), maze_grid, config, buffer, error);
   ExpectTrue(render_ok, "RenderFrameToBuffer should succeed", failures);
   ExpectTrue(error.empty(), "RenderFrameToBuffer error should be empty",
              failures);

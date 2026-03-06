@@ -16,7 +16,9 @@ auto IsValidPosition(GridPosition pos, int height, int width) -> bool {
 auto SolveWithResolvedInputs(const MazeDomain::MazeGrid& maze_data,
                              MazeSolver::SolverAlgorithmType algorithm_type,
                              GridPosition start_node, GridPosition end_node,
-                             int grid_height, int grid_width)
+                             int grid_height, int grid_width,
+                             MazeSolver::ISearchEventSink* event_sink,
+                             const MazeSolver::SolveOptions& options)
     -> MazeSolver::SearchResult {
   const std::string kSolverName =
       MazeSolverDomain::AlgorithmName(algorithm_type);
@@ -61,7 +63,8 @@ auto SolveWithResolvedInputs(const MazeDomain::MazeGrid& maze_data,
   }
 
   MazeSolver::SearchResult result =
-      MazeSolverDomain::Solve(maze_data, start_node, end_node, algorithm_type);
+      MazeSolverDomain::Solve(maze_data, start_node, end_node, algorithm_type,
+                              event_sink, options);
 
   if (result.found_) {
     std::cout << kDisplayName << ": Path found. Length: " << result.path_.size()
@@ -91,14 +94,17 @@ auto SupportedAlgorithms() -> std::vector<std::string> {
 }
 
 auto Solve(const MazeDomain::MazeGrid& maze_data,
-           SolverAlgorithmType algorithm_type, const Config::AppConfig& config)
+           SolverAlgorithmType algorithm_type, const Config::AppConfig& config,
+           ISearchEventSink* event_sink, const SolveOptions& options)
     -> SearchResult {
   const auto& maze = config.maze;
   return SolveWithResolvedInputs(maze_data, algorithm_type, maze.start_node,
-                                 maze.end_node, maze.height, maze.width);
+                                 maze.end_node, maze.height, maze.width,
+                                 event_sink, options);
 }
 
-auto Solve(const MazeApplication::MazeRuntimeContext& runtime_context)
+auto Solve(const MazeApplication::MazeRuntimeContext& runtime_context,
+           ISearchEventSink* event_sink, const SolveOptions& options)
     -> SearchResult {
   if (!runtime_context.IsValid()) {
     std::cerr << "Error: Invalid runtime context for maze solver."
@@ -119,7 +125,7 @@ auto Solve(const MazeApplication::MazeRuntimeContext& runtime_context)
                                  runtime_context.solver_algorithm_,
                                  runtime_context.start_node_,
                                  runtime_context.end_node_, grid_size.height,
-                                 grid_size.width);
+                                 grid_size.width, event_sink, options);
 }
 
 }  // namespace MazeSolver
