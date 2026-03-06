@@ -1,0 +1,20 @@
+# over_inclusive = true：判定逻辑为 大于等于 >=
+# over_inclusive = false：判定逻辑为 严格大于 >
+
+[cpp]
+display_name = "C++"
+default_paths = [
+  "apps/maze_win_gui",
+  "apps/maze_cli",
+  "libs/maze_core",
+  "libs/maze_infra",
+  "libs/maze_usecase",
+]
+extensions = [".cpp", ".h", ".hpp", ".cppm", ".cc", ".cxx", ".c"]
+ignore_dirs = [".git", ".idea", ".vscode", "vs", "bin", "obj", "Debug", "Release"]
+ignore_prefixes = ["build", "cmake", "out"]
+default_over_threshold = 350
+default_under_threshold = 120
+default_dir_over_files = 16
+over_inclusive = false
+
