@@ -5,3 +5,10 @@ input/
 output/
 __pycache__/
 *.png
+
+# Gradle / Android build artifacts
+**/.gradle/
+**/build/
+**/.cxx/
+**/.idea/
+**/local.properties

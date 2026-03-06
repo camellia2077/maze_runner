@@ -4,7 +4,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Enable compilation database" FO
 project(MazeGenerator VERSION 0.3.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 
-set(MAZE_KERNEL_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/libs/maze_core/VERSION")
+set(MAZE_KERNEL_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/libs/maze_core/MAZE_CORE_VERSION.txt")
 if(NOT EXISTS "${MAZE_KERNEL_VERSION_FILE}")
     message(FATAL_ERROR "Kernel version file not found: ${MAZE_KERNEL_VERSION_FILE}")
 endif()
@@ -33,3 +33,7 @@ include(cmake/Install.cmake)
 include(cmake/PostBuild.cmake)
 include(cmake/Messages.cmake)
 include(cmake/Tools.cmake)
+
+if(ANDROID AND MAZE_ENABLE_ANDROID_JNI)
+    add_subdirectory(platform/android/native)
+endif()
